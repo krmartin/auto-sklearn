@@ -41,13 +41,14 @@ Example
     >>> import sklearn.model_selection
     >>> import sklearn.datasets
     >>> import sklearn.metrics
-    >>> X, y = sklearn.datasets.load_digits(return_X_y=True)
-    >>> X_train, X_test, y_train, y_test = \
-            sklearn.model_selection.train_test_split(X, y, random_state=1)
-    >>> automl = autosklearn.classification.AutoSklearnClassifier()
-    >>> automl.fit(X_train, y_train)
-    >>> y_hat = automl.predict(X_test)
-    >>> print("Accuracy score", sklearn.metrics.accuracy_score(y_test, y_hat))
+    >>> if __name__ == "__main__":
+    >>>     X, y = sklearn.datasets.load_digits(return_X_y=True)
+    >>>     X_train, X_test, y_train, y_test = \
+                sklearn.model_selection.train_test_split(X, y, random_state=1)
+    >>>     automl = autosklearn.classification.AutoSklearnClassifier()
+    >>>     automl.fit(X_train, y_train)
+    >>>     y_hat = automl.predict(X_test)
+    >>>     print("Accuracy score", sklearn.metrics.accuracy_score(y_test, y_hat))
 
 
 This will run for one hour and should result in an accuracy above 0.98.
@@ -95,7 +96,7 @@ reference to the following paper:
 If you are using Auto-sklearn 2.0, please also cite
 
 
- Auto-Sklearn 2.0: The Next Generation, Feurer *et al.*, to appear (2020).
+ `Auto-Sklearn 2.0: The Next Generation <https://arxiv.org/abs/2007.04074>`_, Feurer *et al.*, (arXiv, 2020).
 
  Bibtex entry::
 
@@ -105,7 +106,7 @@ If you are using Auto-sklearn 2.0, please also cite
                   Falkner, Stefan and Lindauer, Marius and Hutter, Frank},
         booktitle = {Advances in Neural Information Processing Systems 28},
         year = {2020},
-        journal = {arXiv:2006.???? [cs.LG]},
+        journal = {arXiv:2007.04074 [cs.LG]},
      }
 
 Contributing

@@ -5,11 +5,188 @@
 ..
     The following command allows to retrieve all commiters since a specified
     commit. From http://stackoverflow.com/questions/6482436/list-of-authors-in-git-since-a-given-commit
-    git log 2e29eba.. --format="%aN <%aE>" --reverse | perl -e 'my %dedupe; while (<STDIN>) { print unless $dedupe{$_}++}'
+    git log 25d680d4e9520a661aae48ea4c7295c663b64df3.. --format="%aN <%aE>" --reverse | perl -e 'my %dedupe; while (<STDIN>) { print unless $dedupe{$_}++}'
+
+Version 0.12.6
+==============
+
+* ADD #886: Provide new function which allows fitting only a single configuration.
+* DOC #1070: Clarify example on how successive halving and Bayesian optimization play together.
+* DOC #1112: Fix type.
+* DOC #1122: Add Python 3 to the installation command for Ubuntu.
+* FIX #1114: Fix a bug which made printing dummy models fail.
+* FIX #1117: Fix a bug previously made `memory_limit=None` fail.
+* FIX #1121: Fix an edge case which could decrease performance in Auto-sklearn 2.0 when using
+  cross-validation with iterative fitting.
+* FIX #1123: Fix a bug `autosklearn.metrics.calculate_score` for metrics/scores which need
+  to be minimized where the function previously returned the loss and not the score.
+* FIX #1115/#1124: Fix a bug which would prevent Auto-sklearn from computing meta-features in the
+  multiprocessing case.
+
+Contributors v0.12.6
+********************
+
+* Francisco Rivera Valverde
+* stock90975
+* Lucas Nildaimon dos Santos Silva
+* Matthias Feurer
+* Rohit Agarwal
+
+Version 0.12.5
+==============
+
+* MAINT: Remove ``Cython`` and ``numpy`` as installation requirements.
+
+Contributors v0.12.5
+********************
+
+* Matthias Feurer
 
 ========
 Releases
 ========
+
+Version 0.12.4
+==============
+
+* ADD #660: Enable scikit-learn's power transformation for input features.
+* MAINT: Bump the ``pyrfr`` minimum dependency to 0.8.1 to automatically download wheels from pypi
+  if possible.
+* FIX #732: Add a missing size check into the GMEANS clustering used for the NeurIPS 2015 paper.
+* FIX #1050: Add missing arguments to the ``AutoSklearn2Classifier`` signature.
+* FIX #1072: Fixes a bug where the ``AutoSklearn2Classifier`` could not be created due to trying to
+  cache to the wrong directory.
+
+Contributors v0.12.4
+********************
+
+* Matthias Feurer
+* Francisco Rivera
+* Maximilian Greil
+* Pepe Berba
+
+Version 0.12.3
+==============
+
+* FIX #1061: Fixes a bug where the model could not be printed in a jupyter notebook.
+* FIX #1075: Fixes a bug where the ensemble builder would wrongly prune good models for loss
+  functions (i.e. functions that need to be minimized such as ``logloss`` or ``mean_squared_error``.
+* FIX #1079: Fixes a bug where ``AutoMLClassifier.cv_results`` and ``AutoMLRegressor.cv_results``
+  could rank results in opposite order for loss functions (i.e. functions that need to be minimized
+  such as ``logloss`` or ``mean_squared_error``.
+* FIX: Fixes a bug in offline meta-data generation that could lead to a deadlock.
+* MAINT #1076: Uses the correct multiprocessing context for computing meta-features
+* MAINT: Cleanup readme and main directory
+
+Contributors v0.12.3
+********************
+
+* Matthias Feurer
+* ROHIT AGARWAL
+* Francisco Rivera
+
+========
+Releases
+========
+
+Version 0.12.2
+==============
+
+* ADD #1045: New example demonstrating how to log multiple metrics during a run of Auto-sklearn.
+* DOC #1052: Add links to mybinder
+* DOC #1059: Improved the example on manually starting workers for Auto-sklearn.
+* FIX #1046: Add the final result of the ensemble builder to the ensemble builder trajectory.
+* MAINT: Two log outputs of level warning about metadata were turned reduced to the info loglevel
+  as they are not actionable for the user.
+* MAINT #1062: Use threads for local dask workers and forkserver to start subprocesses to reduce
+  overhead.
+* MAINT #1053: Remove the restriction to guard single-core Auto-sklearn by
+  ``__main__ == "__name__"`` again.
+
+Contributors v0.12.2
+********************
+
+* Matthias Feurer
+* ROHIT AGARWAL
+* Francisco Rivera
+* Katharina Eggensperger
+
+Version 0.12.1
+==============
+
+* ADD: A new heuristic which gives a warning and subsamples the data if it is too large for the
+  given ``memory_limit``.
+* ADD #1024: Tune scikit-learn's ``MLPClassifier`` and ``MLPRegressor``.
+* MAINT #1017: Improve the logging server introduced in release 0.12.0.
+* MAINT #1024: Move to scikit-learn 0.24.X.
+* MAINT #1038: Use new datasets for regression and classification and also update the metadata
+  used for Auto-sklearn 1.0.
+* MAINT #1040: Minor speed improvements in the ensemble selection algorithm.
+
+Contributors v0.12.1
+********************
+
+* Matthias Feurer
+* Katharina Eggensperger
+* Francisco Rivera
+
+Version 0.12.0
+==============
+
+* BREAKING: Auto-sklearn must now be guarded by ``__name__ == "__main__"`` due to the use of the
+  ``spawn`` multiprocessing context.
+* ADD #1026: Adds improved meta-data for Auto-sklearn 2.0 which results in strong improved
+  performance.
+* MAINT #984 and #1008: Move to scikit-learn 0.23.X
+* MAINT #1004: Move from travis-ci to github actions.
+* MAINT 8b67af6: drop the requirement to the lockfile package.
+* FIX #990: Fixes a bug that made Auto-sklearn fail if there are missing values in a pandas
+  DataFrame.
+* FIX #1007, #1012 and #1014: Log multiprocessing output via a new log server. Remove several
+  potential deadlocks related to the joint use of multi-processing, multi-threading and logging.
+
+Contributors v0.12.0
+********************
+
+* Matthias Feurer
+* ROHIT AGARWAL
+* Francisco Rivera
+
+Version 0.11.1
+==============
+
+* FIX #989: Fixes a bug where `y` was not passed to all data preprocessors which made 3rd party
+  category encoders fail.
+* FIX #1001: Fixes a bug which could make Auto-sklearn fail at random.
+* MAINT #1000: Introduce a minimal version for ``dask.distributed``.
+
+Contributors v0.11.1
+********************
+
+* Matthias Feurer
+
+Version 0.11.0
+==============
+
+* ADD #992: Move ensemble building from being a separate process to a job submitted to the dask
+  cluster. This allows for better control of the memory used in multiprocessing settings.
+* FIX #905: Make ``AutoSklearn2Classifier`` picklable.
+* FIX #970: Fix a bug where Auto-sklearn would fail if categorical features are passed as a
+  Pandas Dataframe.
+* MAINT #772: Improve error message in case of dummy prediction failure.
+* MAINT #948: Finally use Pandas >= 1.0.
+* MAINT #973: Improve meta-data by running meta-data generation for more time and separately for
+  important metrics.
+* MAINT #997: Improve memory handling in the ensemble building process. This allows building
+  ensembles for larger datasets.
+
+Contributors v0.11.0
+********************
+
+* Matthias Feurer
+* Francisco Rivera
+* Karl Leswing
+* ROHIT AGARWAL
 
 Version 0.10.0
 ==============

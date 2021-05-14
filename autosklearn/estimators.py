@@ -1,14 +1,22 @@
 # -*- encoding: utf-8 -*-
 
-from typing import Optional, Dict
+from typing import Optional, Dict, List, Tuple, Union
 
+from ConfigSpace.configuration_space import Configuration
 import dask.distributed
 import joblib
 import numpy as np
-from sklearn.base import BaseEstimator
+from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
 from sklearn.utils.multiclass import type_of_target
+from smac.runhistory.runhistory import RunInfo, RunValue
 
+from autosklearn.data.validation import (
+    SUPPORTED_FEAT_TYPES,
+    SUPPORTED_TARGET_TYPES,
+)
+from autosklearn.pipeline.base import BasePipeline
 from autosklearn.automl import AutoMLClassifier, AutoMLRegressor, AutoML
+from autosklearn.metrics import Scorer
 from autosklearn.util.backend import create
 
 
@@ -22,9 +30,8 @@ class AutoSklearnEstimator(BaseEstimator):
         ensemble_size: int = 50,
         ensemble_nbest=50,
         max_models_on_disc=50,
-        ensemble_memory_limit: Optional[int] = 1024,
         seed=1,
-        ml_memory_limit=3072,
+        memory_limit=3072,
         include_estimators=None,
         exclude_estimators=None,
         include_preprocessors=None,
@@ -43,6 +50,8 @@ class AutoSklearnEstimator(BaseEstimator):
         logging_config=None,
         metadata_directory=None,
         metric=None,
+        scoring_functions: Optional[List[Scorer]] = None,
+        load_models: bool = True,
     ):
         """
         Parameters
@@ -82,21 +91,16 @@ class AutoSklearnEstimator(BaseEstimator):
             It must be an integer greater or equal than 1.
             If set to None, all models are kept on the disc.
 
-        ensemble_memory_limit : int, optional (1024)
-            Memory limit in MB for the ensemble building process.
-            `auto-sklearn` will reduce the number of considered models
-            (``ensemble_nbest``) if the memory limit is reached.
-            If ``None``, no memory limit is enforced.
-
         seed : int, optional (default=1)
             Used to seed SMAC. Will determine the output file names.
 
-        ml_memory_limit : int, optional (3072)
+        memory_limit : int, optional (3072)
             Memory limit in MB for the machine learning algorithm.
             `auto-sklearn` will stop fitting the machine learning algorithm if
-            it tries to allocate more than `ml_memory_limit` MB.
+            it tries to allocate more than `memory_limit` MB.
             If None is provided, no memory limit is set.
-            In case of multi-processing, `ml_memory_limit` will be per job.
+            In case of multi-processing, `memory_limit` will be per job.
+            This memory limit also applies to the ensemble creation process.
 
         include_estimators : list, optional (None)
             If None, all possible estimators are used. Otherwise specifies
@@ -159,7 +163,7 @@ class AutoSklearnEstimator(BaseEstimator):
 
         output_folder : string, optional (None)
             folder to store predictions for optional test set, if ``None``
-            automatically use ``/tmp/autosklearn_output_$pid_$random_number``
+            no output will be generated
 
         delete_tmp_folder_after_terminate: string, optional (True)
             remove tmp_folder, when finished. If tmp_folder is None
@@ -170,17 +174,17 @@ class AutoSklearnEstimator(BaseEstimator):
             output_dir will always be deleted
 
         n_jobs : int, optional, experimental
-            The number of jobs to run in parallel for ``fit()``. ``-1`` means 
-            using all processors. By default, Auto-sklearn uses a single core 
+            The number of jobs to run in parallel for ``fit()``. ``-1`` means
+            using all processors. By default, Auto-sklearn uses a single core
             for fitting the machine learning model and a single core for fitting
             an ensemble. Ensemble building is not affected by ``n_jobs`` but
             can be controlled by the number of models in the ensemble. In
             contrast to most scikit-learn models, ``n_jobs`` given in the
-            constructor is not applied to the ``predict()`` method. If 
+            constructor is not applied to the ``predict()`` method. If
             ``dask_client`` is None, a new dask client is created.
-            
+
         dask_client : dask.distributed.Client, optional
-            User-created dask client, can be used to start a dask cluster and then 
+            User-created dask client, can be used to start a dask cluster and then
             attach auto-sklearn to it.
 
         disable_evaluator_output: bool or list, optional (False)
@@ -223,6 +227,13 @@ class AutoSklearnEstimator(BaseEstimator):
             Metrics`_.
             If None is provided, a default metric is selected depending on the task.
 
+        scoring_functions : List[Scorer], optional (None)
+            List of scorers which will be calculated for each pipeline and results will be
+            available via ``cv_results``
+
+        load_models : bool, optional (True)
+            Whether to load the models after fitting Auto-sklearn.
+
         Attributes
         ----------
 
@@ -243,9 +254,8 @@ class AutoSklearnEstimator(BaseEstimator):
         self.ensemble_size = ensemble_size
         self.ensemble_nbest = ensemble_nbest
         self.max_models_on_disc = max_models_on_disc
-        self.ensemble_memory_limit = ensemble_memory_limit
         self.seed = seed
-        self.ml_memory_limit = ml_memory_limit
+        self.memory_limit = memory_limit
         self.include_estimators = include_estimators
         self.exclude_estimators = exclude_estimators
         self.include_preprocessors = include_preprocessors
@@ -263,44 +273,47 @@ class AutoSklearnEstimator(BaseEstimator):
         self.smac_scenario_args = smac_scenario_args
         self.logging_config = logging_config
         self.metadata_directory = metadata_directory
-        self._metric = metric
+        self.metric = metric
+        self.scoring_functions = scoring_functions
+        self.load_models = load_models
 
         self.automl_ = None  # type: Optional[AutoML]
-        # n_jobs after conversion to a number (b/c default is None)
+
+        # Handle the number of jobs and the time for them
         self._n_jobs = None
+        if self.n_jobs is None or self.n_jobs == 1:
+            self._n_jobs = 1
+        elif self.n_jobs == -1:
+            self._n_jobs = joblib.cpu_count()
+        else:
+            self._n_jobs = self.n_jobs
+
         super().__init__()
 
-    def build_automl(
-        self,
-        seed: int,
-        ensemble_size: int,
-        initial_configurations_via_metalearning: int,
-        tmp_folder: str,
-        output_folder: str,
-        smac_scenario_args: Optional[Dict] = None,
-    ):
+    def __getstate__(self):
+        # Cannot serialize a client!
+        self.dask_client = None
+        return self.__dict__
+
+    def build_automl(self):
 
         backend = create(
-            temporary_directory=tmp_folder,
-            output_directory=output_folder,
+            temporary_directory=self.tmp_folder,
+            output_directory=self.output_folder,
             delete_tmp_folder_after_terminate=self.delete_tmp_folder_after_terminate,
             delete_output_folder_after_terminate=self.delete_output_folder_after_terminate,
             )
-
-        if smac_scenario_args is None:
-            smac_scenario_args = self.smac_scenario_args
 
         automl = self._get_automl_class()(
             backend=backend,
             time_left_for_this_task=self.time_left_for_this_task,
             per_run_time_limit=self.per_run_time_limit,
-            initial_configurations_via_metalearning=initial_configurations_via_metalearning,
-            ensemble_size=ensemble_size,
+            initial_configurations_via_metalearning=self.initial_configurations_via_metalearning,
+            ensemble_size=self.ensemble_size,
             ensemble_nbest=self.ensemble_nbest,
             max_models_on_disc=self.max_models_on_disc,
-            ensemble_memory_limit=self.ensemble_memory_limit,
-            seed=seed,
-            ml_memory_limit=self.ml_memory_limit,
+            seed=self.seed,
+            memory_limit=self.memory_limit,
             include_estimators=self.include_estimators,
             exclude_estimators=self.exclude_estimators,
             include_preprocessors=self.include_preprocessors,
@@ -311,41 +324,92 @@ class AutoSklearnEstimator(BaseEstimator):
             dask_client=self.dask_client,
             get_smac_object_callback=self.get_smac_object_callback,
             disable_evaluator_output=self.disable_evaluator_output,
-            smac_scenario_args=smac_scenario_args,
+            smac_scenario_args=self.smac_scenario_args,
             logging_config=self.logging_config,
             metadata_directory=self.metadata_directory,
-            metric=self._metric
+            metric=self.metric,
+            scoring_functions=self.scoring_functions
         )
 
         return automl
 
     def fit(self, **kwargs):
 
-        # Handle the number of jobs and the time for them
-        if self.n_jobs is None or self.n_jobs == 1:
-            self._n_jobs = 1
-        elif self.n_jobs == -1:
-            self._n_jobs = joblib.cpu_count()
-        else:
-            self._n_jobs = self.n_jobs
-
         # Automatically set the cutoff time per task
         if self.per_run_time_limit is None:
             self.per_run_time_limit = self._n_jobs * self.time_left_for_this_task // 10
 
-        seed = self.seed
-        self.automl_ = self.build_automl(
-            seed=seed,
-            ensemble_size=self.ensemble_size,
-            initial_configurations_via_metalearning=(
-                self.initial_configurations_via_metalearning
-            ),
-            tmp_folder=self.tmp_folder,
-            output_folder=self.output_folder,
-        )
-        self.automl_.fit(load_models=True, **kwargs)
+        if self.automl_ is None:
+            self.automl_ = self.build_automl()
+        self.automl_.fit(load_models=self.load_models, **kwargs)
 
         return self
+
+    def fit_pipeline(
+        self,
+        X: SUPPORTED_FEAT_TYPES,
+        y: SUPPORTED_TARGET_TYPES,
+        config: Union[Configuration,  Dict[str, Union[str, float, int]]],
+        dataset_name: Optional[str] = None,
+        X_test: Optional[SUPPORTED_FEAT_TYPES] = None,
+        y_test: Optional[SUPPORTED_TARGET_TYPES] = None,
+        feat_type: Optional[List[str]] = None,
+        *args,
+        **kwargs: Dict,
+    ) -> Tuple[Optional[BasePipeline], RunInfo, RunValue]:
+        """ Fits and individual pipeline configuration and returns
+        the result to the user.
+
+        The Estimator constraints are honored, for example the resampling
+        strategy, or memory constraints, unless directly provided to the method.
+        By default, this method supports the same signature as fit(), and any extra
+        arguments are redirected to the TAE evaluation function, which allows for
+        further customization while building a pipeline.
+
+        Any additional argument provided is directly passed to the worker exercising the run.
+
+        Parameters
+        ----------
+        X: array-like, shape = (n_samples, n_features)
+            The features used for training
+        y: array-like
+            The labels used for training
+        X_test: Optionalarray-like, shape = (n_samples, n_features)
+            If provided, the testing performance will be tracked on this features.
+        y_test: array-like
+            If provided, the testing performance will be tracked on this labels
+        config: Union[Configuration,  Dict[str, Union[str, float, int]]]
+            A configuration object used to define the pipeline steps.
+            If a dictionary is passed, a configuration is created based on this dictionary.
+        dataset_name: Optional[str]
+            Name that will be used to tag the Auto-Sklearn run and identify the
+            Auto-Sklearn run
+        feat_type : list, optional (default=None)
+            List of str of `len(X.shape[1])` describing the attribute type.
+            Possible types are `Categorical` and `Numerical`. `Categorical`
+            attributes will be automatically One-Hot encoded. The values
+            used for a categorical attribute must be integers, obtained for
+            example by `sklearn.preprocessing.LabelEncoder
+            <http://scikit-learn.org/stable/modules/generated/sklearn.preprocessing.LabelEncoder.html>`_.
+
+        Returns
+        -------
+        pipeline: Optional[BasePipeline]
+            The fitted pipeline. In case of failure while fitting the pipeline,
+            a None is returned.
+        run_info: RunInFo
+            A named tuple that contains the configuration launched
+        run_value: RunValue
+            A named tuple that contains the result of the run
+        """
+        if self.automl_ is None:
+            self.automl_ = self.build_automl()
+        return self.automl_.fit_pipeline(X=X, y=y,
+                                         dataset_name=dataset_name,
+                                         config=config,
+                                         feat_type=feat_type,
+                                         X_test=X_test, y_test=y_test,
+                                         *args, **kwargs)
 
     def fit_ensemble(self, y, task=None, precision=32,
                      dataset_name=None, ensemble_nbest=None,
@@ -390,17 +454,9 @@ class AutoSklearnEstimator(BaseEstimator):
         """
         if self.automl_ is None:
             # Build a dummy automl object to call fit_ensemble
-            self.automl_ = self.build_automl(
-                seed=self.seed,
-                ensemble_size=(
-                    ensemble_size
-                    if ensemble_size is not None else
-                    self.ensemble_size
-                ),
-                initial_configurations_via_metalearning=0,
-                tmp_folder=self.tmp_folder,
-                output_folder=self.output_folder,
-            )
+            # The ensemble size is honored in the .automl_.fit_ensemble
+            # call
+            self.automl_ = self.build_automl()
         self.automl_.fit_ensemble(
             y=y,
             task=task,
@@ -502,11 +558,43 @@ class AutoSklearnEstimator(BaseEstimator):
     def _get_automl_class(self):
         raise NotImplementedError()
 
-    def get_configuration_space(self, X, y):
-        return self.automl_.configuration_space
+    def get_configuration_space(
+        self,
+        X: SUPPORTED_FEAT_TYPES,
+        y: SUPPORTED_TARGET_TYPES,
+        X_test: Optional[SUPPORTED_FEAT_TYPES] = None,
+        y_test: Optional[SUPPORTED_TARGET_TYPES] = None,
+        dataset_name: Optional[str] = None,
+    ):
+        """
+        Returns the Configuration Space object, from which Auto-Sklearn
+        will sample configurations and build pipelines.
+
+        Parameters
+        ----------
+        X : array-like or sparse matrix of shape = [n_samples, n_features]
+            Array with the training features, used to get characteristics like
+            data sparsity
+        y : array-like, shape = [n_samples] or [n_samples, n_outputs]
+            Array with the problem labels
+        X_test : array-like or sparse matrix of shape = [n_samples, n_features]
+            Array with features used for performance estimation
+        y_test : array-like, shape = [n_samples] or [n_samples, n_outputs]
+            Array with the problem labels for the testing split
+        dataset_name: Optional[str]
+            A string to tag the Auto-Sklearn run
+        """
+        if self.automl_ is None:
+            self.automl_ = self.build_automl()
+        return self.automl_.fit(
+            X, y,
+            X_test=X_test, y_test=y_test,
+            dataset_name=dataset_name,
+            only_return_configuration_space=True,
+        ) if self.automl_.configuration_space is None else self.automl_.configuration_space
 
 
-class AutoSklearnClassifier(AutoSklearnEstimator):
+class AutoSklearnClassifier(AutoSklearnEstimator, ClassifierMixin):
     """
     This class implements the classification task.
 
@@ -587,6 +675,11 @@ class AutoSklearnClassifier(AutoSklearnEstimator):
             dataset_name=dataset_name,
         )
 
+        # After fit, a classifier is expected to define classes_
+        # A list of class labels known to the classifier, mapping each label
+        # to a numerical index used in the model representation our output.
+        self.classes_ = self.automl_.InputValidator.target_validator.classes_
+
         return self
 
     def predict(self, X, batch_size=None, n_jobs=1):
@@ -646,7 +739,7 @@ class AutoSklearnClassifier(AutoSklearnEstimator):
         return AutoMLClassifier
 
 
-class AutoSklearnRegressor(AutoSklearnEstimator):
+class AutoSklearnRegressor(AutoSklearnEstimator, RegressorMixin):
     """
     This class implements the regression task.
 

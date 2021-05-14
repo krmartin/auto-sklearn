@@ -1,7 +1,6 @@
-import copy
 from abc import ABCMeta, abstractmethod
 from functools import partial
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union, cast
 
 import numpy as np
 
@@ -127,12 +126,28 @@ class _ProbaScorer(Scorer):
         score : float
             Score function applied to prediction of estimator on X.
         """
+
+        if self._score_func is sklearn.metrics.log_loss:
+            n_labels_pred = np.array(y_pred).reshape((len(y_pred), -1)).shape[1]
+            n_labels_test = len(np.unique(y_true))
+            if n_labels_pred != n_labels_test:
+                labels = list(range(n_labels_pred))
+                if sample_weight is not None:
+                    return self._sign * self._score_func(y_true, y_pred,
+                                                         sample_weight=sample_weight,
+                                                         labels=labels,
+                                                         **self._kwargs)
+                else:
+                    return self._sign * self._score_func(y_true, y_pred,
+                                                         labels=labels, **self._kwargs)
+
         if sample_weight is not None:
             return self._sign * self._score_func(y_true, y_pred,
                                                  sample_weight=sample_weight,
                                                  **self._kwargs)
         else:
-            return self._sign * self._score_func(y_true, y_pred, **self._kwargs)
+            return self._sign * self._score_func(y_true, y_pred,
+                                                 **self._kwargs)
 
 
 class _ThresholdScorer(Scorer):
@@ -325,33 +340,59 @@ def calculate_score(
     prediction: np.ndarray,
     task_type: int,
     metric: Scorer,
-    all_scoring_functions: bool = False
+    scoring_functions: Optional[List[Scorer]] = None
 ) -> Union[float, Dict[str, float]]:
+    """
+    Returns a score (a magnitude that allows casting the
+    optimization problem as a maximization one) for the
+    given Auto-Sklearn Scorer object
+
+    Parameters
+    ----------
+    solution: np.ndarray
+        The ground truth of the targets
+    prediction: np.ndarray
+        The best estimate from the model, of the given targets
+    task_type: int
+        To understand if the problem task is classification
+        or regression
+    metric: Scorer
+        Object that host a function to calculate how good the
+        prediction is according to the solution.
+    scoring_functions: List[Scorer]
+        A list of metrics to calculate multiple losses
+    Returns
+    -------
+    float or Dict[str, float]
+    """
     if task_type not in TASK_TYPES:
         raise NotImplementedError(task_type)
 
-    if all_scoring_functions:
+    if scoring_functions:
         score_dict = dict()
         if task_type in REGRESSION_TASKS:
-            # TODO put this into the regression metric itself
-            cprediction = sanitize_array(prediction)
-            metric_dict = copy.copy(REGRESSION_METRICS)
-            metric_dict[metric.name] = metric
-            for metric_ in REGRESSION_METRICS:
-                func = REGRESSION_METRICS[metric_]
-                score_dict[func.name] = func(solution, cprediction)
+            for metric_ in scoring_functions + [metric]:
+
+                try:
+                    score_dict[metric_.name] = _compute_scorer(
+                        metric_, prediction, solution, task_type)
+                except ValueError as e:
+                    print(e, e.args[0])
+                    if e.args[0] == "Mean Squared Logarithmic Error cannot be used when " \
+                                    "targets contain negative values.":
+                        continue
+                    else:
+                        raise e
 
         else:
-            metric_dict = copy.copy(CLASSIFICATION_METRICS)
-            metric_dict[metric.name] = metric
-            for metric_ in metric_dict:
-                func = CLASSIFICATION_METRICS[metric_]
+            for metric_ in scoring_functions + [metric]:
 
                 # TODO maybe annotate metrics to define which cases they can
                 # handle?
 
                 try:
-                    score_dict[func.name] = func(solution, prediction)
+                    score_dict[metric_.name] = _compute_scorer(
+                        metric_, prediction, solution, task_type)
                 except ValueError as e:
                     if e.args[0] == 'multiclass format is not supported':
                         continue
@@ -364,14 +405,139 @@ def calculate_score(
                         continue
                     else:
                         raise e
+
         return score_dict
 
     else:
-        if task_type in REGRESSION_TASKS:
-            # TODO put this into the regression metric itself
-            cprediction = sanitize_array(prediction)
-            score = metric(solution, cprediction)
-        else:
-            score = metric(solution, prediction)
+        return _compute_scorer(metric, prediction, solution, task_type)
 
-        return score
+
+def calculate_loss(
+    solution: np.ndarray,
+    prediction: np.ndarray,
+    task_type: int,
+    metric: Scorer,
+    scoring_functions: Optional[List[Scorer]] = None
+) -> Union[float, Dict[str, float]]:
+    """
+    Returns a loss (a magnitude that allows casting the
+    optimization problem as a minimization one) for the
+    given Auto-Sklearn Scorer object
+
+    Parameters
+    ----------
+    solution: np.ndarray
+        The ground truth of the targets
+    prediction: np.ndarray
+        The best estimate from the model, of the given targets
+    task_type: int
+        To understand if the problem task is classification
+        or regression
+    metric: Scorer
+        Object that host a function to calculate how good the
+        prediction is according to the solution.
+    scoring_functions: List[Scorer]
+        A list of metrics to calculate multiple losses
+
+    Returns
+    -------
+    float or Dict[str, float]
+        A loss function for each of the provided scorer objects
+    """
+    score = calculate_score(
+        solution=solution,
+        prediction=prediction,
+        task_type=task_type,
+        metric=metric,
+        scoring_functions=scoring_functions,
+    )
+
+    if scoring_functions:
+        score = cast(Dict, score)
+        # we expect a dict() object for which we should calculate the loss
+        loss_dict = dict()
+        for metric_ in scoring_functions + [metric]:
+            # TODO: When metrics are annotated with type_of_target support
+            # we can remove this check
+            if metric_.name not in score:
+                continue
+            # maybe metric argument is not in scoring_functions
+            # so append it to the list. Rather than check if such
+            # is the case, redefining loss_dict[metric] is less expensive
+            loss_dict[metric_.name] = metric_._optimum - score[metric_.name]
+        return loss_dict
+    else:
+        rval = metric._optimum - cast(float, score)
+        return rval
+
+
+def calculate_metric(
+    metric: Scorer,
+    prediction: np.ndarray,
+    solution: np.ndarray,
+    task_type: int
+) -> float:
+    """
+    Returns a metric for the given Auto-Sklearn Scorer object.
+    It's direction is determined by the metric itself.
+
+    Parameters
+    ----------
+    solution: np.ndarray
+        The ground truth of the targets
+    prediction: np.ndarray
+        The best estimate from the model, of the given targets
+    task_type: int
+        To understand if the problem task is classification
+        or regression
+    metric: Scorer
+        Object that host a function to calculate how good the
+        prediction is according to the solution.
+
+    Returns
+    -------
+    float
+    """
+    score = _compute_scorer(
+        solution=solution,
+        prediction=prediction,
+        metric=metric,
+        task_type=task_type,
+    )
+    return metric._sign * score
+
+
+def _compute_scorer(
+    metric: Scorer,
+    prediction: np.ndarray,
+    solution: np.ndarray,
+    task_type: int
+) -> float:
+    """
+    Returns a score (a magnitude that allows casting the
+    optimization problem as a maximization one) for the
+    given Auto-Sklearn Scorer object
+
+    Parameters
+    ----------
+    solution: np.ndarray
+        The ground truth of the targets
+    prediction: np.ndarray
+        The best estimate from the model, of the given targets
+    task_type: int
+        To understand if the problem task is classification
+        or regression
+    metric: Scorer
+        Object that host a function to calculate how good the
+        prediction is according to the solution.
+    Returns
+    -------
+    float
+    """
+    if task_type in REGRESSION_TASKS:
+        # TODO put this into the regression metric itself
+        cprediction = sanitize_array(prediction)
+        score = metric(solution, cprediction)
+    else:
+        score = metric(solution, prediction)
+    return score
